@@ -5,7 +5,7 @@ temp = require 'temp'
 Random = require 'random-seed'
 Point = require '../src/point'
 Range = require '../src/range'
-DisplayLayer = require '../src/display-layer'
+iconv = require 'iconv-lite'
 TextBuffer = require '../src/text-buffer'
 SampleText = fs.readFileSync(join(__dirname, 'fixtures', 'sample.js'), 'utf8')
 
@@ -59,36 +59,6 @@ describe "TextBuffer", ->
       uniqueBufferIds = new Set(bufferIds)
 
       expect(uniqueBufferIds.size).toBe(bufferIds.length)
-
-    describe "when a file path is given", ->
-      [filePath] = []
-
-      beforeEach (done) ->
-        filePath = require.resolve('./fixtures/sample.js')
-        buffer = new TextBuffer({filePath, load: false})
-        buffer.load().then ->
-          done()
-
-      afterEach ->
-        buffer?.destroy()
-
-      describe "when a file exists for the path", ->
-        it "loads the contents of that file", ->
-          expect(buffer.getText()).toBe fs.readFileSync(filePath, 'utf8')
-
-        it "does not allow the initial state of the buffer to be undone", ->
-          buffer.undo()
-          expect(buffer.getText()).toBe fs.readFileSync(filePath, 'utf8')
-
-      describe "when no file exists for the path", ->
-        it "is not modified and is initially empty", (done) ->
-          filePath = "does-not-exist.txt"
-          expect(fs.existsSync(filePath)).toBeFalsy()
-          buffer = new TextBuffer({filePath, load: false})
-          buffer.load().then ->
-            expect(buffer.isModified()).not.toBeTruthy()
-            expect(buffer.getText()).toBe ''
-            done()
 
   describe "::setTextInRange(range, text)", ->
     beforeEach ->
@@ -512,7 +482,6 @@ describe "TextBuffer", ->
 
         # no changes occur in this transaction before aborting
         buffer.transact ->
-          buffer.markRange([[0, 0], [0, 5]])
           buffer.abortTransaction()
           buffer.setTextInRange([[0, 0], [0, 5]], "hey")
 
@@ -584,7 +553,6 @@ describe "TextBuffer", ->
 
       it "allows undo/redo within transactions, but not beyond the start of the containing transaction", ->
         buffer.setText("")
-        buffer.markPosition([0, 0])
 
         buffer.append("a")
 
@@ -680,8 +648,6 @@ describe "TextBuffer", ->
           buffer.append("three\n")
           buffer.append("four")
 
-        historyLayer = buffer.addMarkerLayer(maintainHistory: true)
-        historyLayer.markRange([[0, 1], [2, 3]], a: 'b')
         result = buffer.groupChangesSinceCheckpoint(checkpoint)
 
         expect(result).toBeTruthy()
@@ -702,10 +668,6 @@ describe "TextBuffer", ->
           three
           four
         """
-
-        [marker] = historyLayer.getMarkers()
-        expect(marker.getRange()).toEqual [[0, 1], [2, 3]]
-        expect(marker.getProperties()).toEqual {a: 'b'}
 
       it "skips any later checkpoints when grouping changes", ->
         buffer.append("one\n")
@@ -884,31 +846,14 @@ describe "TextBuffer", ->
       expect(buffer.positionForCharacterIndex(20)).toEqual [3, 5]
 
   describe "serialization", ->
-    expectSameMarkers = (left, right) ->
-      markers1 = left.getMarkers().sort (a, b) -> a.compare(b)
-      markers2 = right.getMarkers().sort (a, b) -> a.compare(b)
-      expect(markers1.length).toBe markers2.length
-      for marker1, i in markers1
-        expect(marker1).toEqual(markers2[i])
-      return
-
-    it "can serialize / deserialize the buffer along with its history, marker layers, and display layers", (done) ->
+    it "can serialize / deserialize the buffer along with its history", (done) ->
       bufferA = new TextBuffer(text: "hello\nworld\r\nhow are you doing?")
-      displayLayer1A = bufferA.addDisplayLayer()
-      displayLayer2A = bufferA.addDisplayLayer()
-      displayLayer1A.foldBufferRange([[0, 1], [0, 3]])
-      displayLayer2A.foldBufferRange([[0, 0], [0, 2]])
       bufferA.createCheckpoint()
       bufferA.setTextInRange([[0, 5], [0, 5]], " there")
       bufferA.transact -> bufferA.setTextInRange([[1, 0], [1, 5]], "friend")
-      layerA = bufferA.addMarkerLayer(maintainHistory: true, persistent: true)
-      layerA.markRange([[0, 6], [0, 8]], reversed: true, foo: 1)
-      marker2A = bufferA.markPosition([2, 2], bar: 2)
       bufferA.transact ->
         bufferA.setTextInRange([[1, 0], [1, 0]], "good ")
         bufferA.append("?")
-        marker2A.setProperties(bar: 3, baz: 4)
-      layerA.markRange([[0, 4], [0, 5]], invalidate: 'inside')
       bufferA.setTextInRange([[0, 5], [0, 5]], "oo")
       bufferA.undo()
 
@@ -916,114 +861,32 @@ describe "TextBuffer", ->
       bufferB = TextBuffer.deserialize(state)
 
       expect(bufferB.getText()).toBe "hello there\ngood friend\r\nhow are you doing??"
-      expectSameMarkers(bufferB.getMarkerLayer(layerA.id), layerA)
-      expect(bufferB.getDisplayLayer(displayLayer1A.id).foldsIntersectingBufferRange([[0, 1], [0, 3]]).length).toBe(1)
-      expect(bufferB.getDisplayLayer(displayLayer2A.id).foldsIntersectingBufferRange([[0, 0], [0, 2]]).length).toBe(1)
-      displayLayer3B = bufferB.addDisplayLayer()
-      expect(displayLayer3B.id).toBeGreaterThan(displayLayer1A.id)
-      expect(displayLayer3B.id).toBeGreaterThan(displayLayer2A.id)
 
       bufferA.redo()
       bufferB.redo()
       expect(bufferB.getText()).toBe "hellooo there\ngood friend\r\nhow are you doing??"
-      expectSameMarkers(bufferB.getMarkerLayer(layerA.id), layerA)
-      expect(bufferB.getMarkerLayer(layerA.id).maintainHistory).toBe true
-      expect(bufferB.getMarkerLayer(layerA.id).persistent).toBe true
 
       bufferA.undo()
       bufferB.undo()
       expect(bufferB.getText()).toBe "hello there\ngood friend\r\nhow are you doing??"
-      expectSameMarkers(bufferB.getMarkerLayer(layerA.id), layerA)
 
       bufferA.undo()
       bufferB.undo()
       expect(bufferB.getText()).toBe "hello there\nfriend\r\nhow are you doing?"
-      expectSameMarkers(bufferB.getMarkerLayer(layerA.id), layerA)
 
       bufferA.undo()
       bufferB.undo()
       expect(bufferB.getText()).toBe "hello there\nworld\r\nhow are you doing?"
-      expectSameMarkers(bufferB.getMarkerLayer(layerA.id), layerA)
 
       bufferA.undo()
       bufferB.undo()
       expect(bufferB.getText()).toBe "hello\nworld\r\nhow are you doing?"
-      expectSameMarkers(bufferB.getMarkerLayer(layerA.id), layerA)
-
-      # Accounts for deserialized markers when selecting the next marker's id
-      marker3A = layerA.markRange([[0, 1], [2, 3]])
-      marker3B = bufferB.getMarkerLayer(layerA.id).markRange([[0, 1], [2, 3]])
-      expect(marker3B.id).toBe marker3A.id
 
       # Doesn't try to reload the buffer since it has no file.
       setTimeout(->
         expect(bufferB.getText()).toBe "hello\nworld\r\nhow are you doing?"
         done()
       , 50)
-
-    it "serializes / deserializes the buffer's persistent custom marker layers", ->
-      bufferA = new TextBuffer("abcdefghijklmnopqrstuvwxyz")
-
-      layer1A = bufferA.addMarkerLayer()
-      layer2A = bufferA.addMarkerLayer(persistent: true)
-
-      layer1A.markRange([[0, 1], [0, 2]])
-      layer1A.markRange([[0, 3], [0, 4]])
-
-      layer2A.markRange([[0, 5], [0, 6]])
-      layer2A.markRange([[0, 7], [0, 8]])
-
-      bufferB = TextBuffer.deserialize(JSON.parse(JSON.stringify(bufferA.serialize())))
-      layer1B = bufferB.getMarkerLayer(layer1A.id)
-      layer2B = bufferB.getMarkerLayer(layer2A.id)
-      expect(layer2B.persistent).toBe true
-
-      expect(layer1B).toBe undefined
-      expectSameMarkers(layer2A, layer2B)
-
-    it "doesn't serialize the default marker layer", ->
-      bufferA = new TextBuffer(text: "hello\nworld\r\nhow are you doing?")
-      markerLayerA = bufferA.getDefaultMarkerLayer()
-      marker1A = bufferA.markRange([[0, 1], [1, 2]], foo: 1)
-
-      bufferB = TextBuffer.deserialize(bufferA.serialize())
-      markerLayerB = bufferB.getDefaultMarkerLayer()
-      expect(markerLayerA.id).not.toBe(markerLayerB.id)
-      expect(bufferB.getMarker(marker1A.id)).toBeUndefined()
-
-    it "doesn't attempt to serialize snapshots for destroyed marker layers", ->
-      buffer = new TextBuffer(text: "abc")
-      markerLayer = buffer.addMarkerLayer(maintainHistory: true, persistent: true)
-      markerLayer.markPosition([0, 3])
-      buffer.insert([0, 0], 'x')
-      markerLayer.destroy()
-
-      expect(-> buffer.serialize()).not.toThrowError()
-
-    it "doesn't remember marker layers when calling serialize with {markerLayers: false}", ->
-      bufferA = new TextBuffer(text: "world")
-      layerA = bufferA.addMarkerLayer(maintainHistory: true)
-      markerA = layerA.markPosition([0, 3])
-      markerB = null
-      bufferA.transact ->
-        bufferA.insert([0, 0], 'hello ')
-        markerB = layerA.markPosition([0, 5])
-      bufferA.undo()
-
-      bufferB = TextBuffer.deserialize(bufferA.serialize({markerLayers: false}))
-      expect(bufferB.getText()).toBe("world")
-      expect(bufferB.getMarkerLayer(layerA.id)?.getMarker(markerA.id)).toBeUndefined()
-      expect(bufferB.getMarkerLayer(layerA.id)?.getMarker(markerB.id)).toBeUndefined()
-
-      bufferB.redo()
-      expect(bufferB.getText()).toBe("hello world")
-      expect(bufferB.getMarkerLayer(layerA.id)?.getMarker(markerA.id)).toBeUndefined()
-      expect(bufferB.getMarkerLayer(layerA.id)?.getMarker(markerB.id)).toBeUndefined()
-
-      bufferB.undo()
-      expect(bufferB.getText()).toBe("world")
-      expect(bufferB.getMarkerLayer(layerA.id)?.getMarker(markerA.id)).toBeUndefined()
-      expect(bufferB.getMarkerLayer(layerA.id)?.getMarker(markerB.id)).toBeUndefined()
 
     it "serializes / deserializes the buffer's unique identifier", ->
       bufferA = new TextBuffer()
@@ -1037,96 +900,6 @@ describe "TextBuffer", ->
       serializedBuffer.version = 123456789
 
       expect(TextBuffer.deserialize(serializedBuffer)).toBeUndefined()
-
-    describe "when the buffer has a path", ->
-      [filePath, buffer2] = []
-
-      beforeEach (done) ->
-        filePath = temp.openSync('atom').path
-        fs.writeFileSync(filePath, "words")
-        buffer = new TextBuffer({filePath, load: false})
-        buffer.load().then ->
-          done()
-
-      afterEach ->
-        buffer2?.destroy()
-
-      describe "when the serialized buffer had no unsaved changes", ->
-        [buffer2, buffer2ModifiedEvents] = []
-        beforeEach (done) ->
-          buffer.append("!")
-          buffer.save()
-          expect(buffer.isModified()).toBeFalsy()
-          params = buffer.serialize()
-          params.load = false
-          buffer2 = TextBuffer.deserialize(params)
-          buffer2ModifiedEvents = []
-          buffer2.onDidChangeModified (value) -> buffer2ModifiedEvents.push(value)
-          buffer2.load().then ->
-            done()
-
-        it "loads the current contents of the file at the serialized path", (done) ->
-          expect(buffer2.isModified()).toBeFalsy()
-          expect(buffer2ModifiedEvents).toEqual [false]
-          expect(buffer2.getPath()).toBe(filePath)
-          expect(buffer2.getText()).toBe('words!')
-
-          buffer.undo()
-          buffer2.undo()
-          setTimeout(->
-            expect(buffer2.getText()).toBe('words')
-            expect(buffer2ModifiedEvents).toEqual [false, true]
-            done()
-          , buffer.stoppedChangingDelay)
-
-      describe "when the serialized buffer had unsaved changes", ->
-        describe "when the disk contents were changed since serialization", ->
-          it "loads the disk contents instead of the previous unsaved state", (done) ->
-            buffer.setText("BUFFER CHANGE")
-            fs.writeFileSync(filePath, "DISK CHANGE")
-
-            params = buffer.serialize()
-            params.load = false
-            buffer2 = TextBuffer.deserialize(params)
-            buffer2.load().then ->
-              expect(buffer2.getPath()).toBe(buffer.getPath())
-              expect(buffer2.getText()).toBe("DISK CHANGE")
-              expect(buffer2.isModified()).toBeFalsy()
-              done()
-
-        describe "when the disk contents are the same since serialization", ->
-          [previousText] = []
-          beforeEach (done) ->
-            previousText = buffer.getText()
-            buffer.setText("abc")
-            buffer.append("d")
-
-            buffer2 = TextBuffer.deserialize(buffer.serialize())
-            buffer2.load().then ->
-              done()
-
-          it "restores the previous unsaved state of the buffer", ->
-            expect(buffer2.getPath()).toBe(buffer.getPath())
-            expect(buffer2.getText()).toBe(buffer.getText())
-            expect(buffer2.isModified()).toBeTruthy()
-
-            buffer.undo()
-            buffer2.undo()
-            expect(buffer2.getText()).toBe(buffer.getText())
-
-            buffer2.setText(previousText)
-            expect(buffer2.isModified()).toBeFalsy()
-
-      describe "when the serialized buffer was unsaved and had no path", ->
-        it "restores the previous unsaved state of the buffer", ->
-          buffer.destroy()
-
-          buffer = new TextBuffer()
-          buffer.setText("abc")
-
-          buffer2 = TextBuffer.deserialize(buffer.serialize())
-          expect(buffer2.getPath()).toBeUndefined()
-          expect(buffer2.getText()).toBe("abc")
 
   describe "::getRange()", ->
     it "returns the range of the entire buffer text", ->
@@ -1154,366 +927,23 @@ describe "TextBuffer", ->
         expect(buffer.rangeForRow(-1)).toEqual([[0, 0], [0, 4]])
         expect(buffer.rangeForRow(10)).toEqual([[2, 0], [2, 7]])
 
-  describe "::onDidChangePath()", ->
-    [filePath, newPath, bufferToChange, eventHandler] = []
-
-    beforeEach (done) ->
-      tempDir = fs.realpathSync(temp.mkdirSync('text-buffer'))
-      filePath = join(tempDir, "manipulate-me")
-      newPath = "#{filePath}-i-moved"
-      fs.writeFileSync(filePath, "")
-      bufferToChange = new TextBuffer({filePath, load: false})
-      bufferToChange.load().then ->
-        done()
-
-    afterEach ->
-      bufferToChange.destroy()
-      fs.removeSync(filePath)
-      fs.removeSync(newPath)
-
-    it "notifies observers when the buffer is saved to a new path", (done) ->
-      bufferToChange.onDidChangePath (p) ->
-        expect(p).toBe(newPath)
-        done()
-      bufferToChange.saveAs(newPath)
-
-    it "notifies observers when the buffer's file is moved", (done) ->
-      # FIXME: This doesn't pass on Linux
-      if process.platform in ['linux', 'win32']
-        done()
-        return
-
-      bufferToChange.onDidChangePath (p) ->
-        expect(p).toBe(newPath)
-        done()
-
-      fs.removeSync(newPath)
-      fs.moveSync(filePath, newPath)
-
-  describe "::onWillThrowWatchError", ->
-    [filePath, bufferToChange, eventHandler] = []
-
-    beforeEach (done) ->
-      tempDir = fs.realpathSync(temp.mkdirSync('text-buffer'))
-      filePath = join(tempDir , "manipulate-me")
-      fs.writeFileSync(filePath, "")
-      bufferToChange = new TextBuffer({filePath, load: false})
-      eventHandler = jasmine.createSpy('eventHandler')
-      bufferToChange.onWillThrowWatchError eventHandler
-      bufferToChange.load().then ->
-        done()
-
-    afterEach ->
-      bufferToChange.destroy()
-      fs.removeSync(filePath)
-
-    it "notifies observers when the file has a watch error", ->
-      bufferToChange.file.emitter.emit 'will-throw-watch-error', 'arg'
-      expect(eventHandler).toHaveBeenCalledWith 'arg'
-
-  describe "when the buffer's on-disk contents change", ->
-    filePath = null
-
-    beforeEach (done) ->
-      filePath = temp.openSync('atom').path
-      fs.writeFileSync(filePath, "first")
-      buffer = new TextBuffer({filePath, load: false})
-      buffer.load().then ->
-        done()
-
-    afterEach ->
-      buffer?.destroy()
-
-    it "does not notify ::onDidChange observers when the file is written via TextBuffer::save", (done) ->
-      buffer.insert([0,0], "HELLO!")
-      changeHandler = jasmine.createSpy("buffer changed")
-      buffer.onDidChange changeHandler
-      buffer.save()
-      setTimeout(->
-        expect(changeHandler).not.toHaveBeenCalled()
-        done()
-      , 30)
-
-    describe "when the buffer is in an unmodified state before the file is modified on disk", ->
-      [event1, event2] = []
-      beforeEach (done) ->
-        calls = 0
-        buffer.onDidChange (args) ->
-          calls = calls + 1
-          event1 = args if calls is 1
-          event2 = args if calls is 2
-          done() if calls > 1
-        fs.writeFileSync(filePath, "second")
-        expect(calls).toBe(0)
-
-      it "changes the in-memory contents of the buffer to match the new disk contents and notifies ::onDidChange observers", ->
-        expect(event1.oldRange).toEqual [[0, 0], [0, 5]]
-        expect(event1.newRange).toEqual [[0, 0], [0, 0]]
-        expect(event1.oldText).toBe "first"
-        expect(event1.newText).toBe ""
-
-        expect(event2.oldRange).toEqual [[0, 0], [0, 0]]
-        expect(event2.newRange).toEqual [[0, 0], [0, 6]]
-        expect(event2.oldText).toBe ""
-        expect(event2.newText).toBe "second"
-
-        expect(buffer.isModified()).toBeFalsy()
-
-    describe "when the buffer's memory contents differ from the *previous* disk contents", ->
-      it "leaves the buffer in a modified state (does not update its memory contents)", (done) ->
-        calls = 0
-        buffer.file.onDidChange ->
-          calls = calls + 1
-          expect(buffer.isModified()).toBeTruthy()
-          done() if calls > 1
-
-        expect(calls).toBe 0
-        buffer.insert([0, 0], "a change")
-        fs.writeFileSync(filePath, "second")
-
-      it "notifies ::onDidConflict observers", (done) ->
-        buffer.setText("a change")
-        buffer.save()
-        buffer.insert([0, 0], "a second change")
-        called = false
-        buffer.onDidConflict ->
-          called = true
-          done()
-
-        expect(called).toBe false
-        fs.writeFileSync(filePath, "a disk change")
-
-  describe "when the buffer's file is deleted (via another process)", ->
-    [filePath, bufferToDelete] = []
-
-    beforeEach (done) ->
-      tempDir = fs.realpathSync(temp.mkdirSync())
-      filePath = join(tempDir, 'atom-file-to-delete.txt')
-      fs.writeFileSync(filePath, 'delete me')
-      bufferToDelete = new TextBuffer({filePath, load: false})
-      filePath = bufferToDelete.getPath() # symlinks may have been converted
-      expect(bufferToDelete.getPath()).toBe filePath
-      bufferToDelete.load().then ->
-        done()
-
-    afterEach ->
-      bufferToDelete?.destroy()
-
-    describe "when the file is modified", ->
-      beforeEach (done) ->
-        bufferToDelete.setText("I WAS MODIFIED")
-        expect(bufferToDelete.isModified()).toBeTruthy()
-        bufferToDelete.file.onDidDelete ->
-          done()
-        fs.removeSync(filePath)
-
-      it "retains its path and reports the buffer as modified", ->
-        expect(bufferToDelete.getPath()).toBe filePath
-        expect(bufferToDelete.isModified()).toBeTruthy()
-
-    describe "when the file is not modified", ->
-      beforeEach (done) ->
-        expect(bufferToDelete.isModified()).toBeFalsy()
-        bufferToDelete.file.onDidDelete ->
-          done()
-        fs.removeSync(filePath)
-
-      it "retains its path and reports the buffer as not modified", ->
-        # FIXME: This doesn't pass on Linux
-        return if process.platform is 'linux'
-
-        expect(bufferToDelete.getPath()).toBe filePath
-        expect(bufferToDelete.isModified()).toBeFalsy()
-
-
-    describe "when the file is deleted", ->
-      it "notifies all onDidDelete listeners ", (done) ->
-        bufferToDelete.onDidDelete ->
-          done()
-        fs.removeSync(filePath)
-
-    it "resumes watching of the file when it is re-saved", (done) ->
-      bufferToDelete.save()
-      expect(fs.existsSync(bufferToDelete.getPath())).toBeTruthy()
-      expect(bufferToDelete.isInConflict()).toBeFalsy()
-
-      fs.writeFileSync(filePath, 'moo')
-
-      bufferToDelete.onDidChange ->
-        done()
-
-  describe "modified status", ->
-    [filePath, modifiedHandler, doneFunc] = []
-
-    beforeEach (done) ->
-      tempDir = temp.mkdirSync()
-      filePath = join(tempDir, 'atom-tmp-file')
-      fs.writeFileSync(filePath, '')
-      buffer = new TextBuffer({filePath, load: false})
-      buffer.load().then ->
-        done()
-
-    afterEach ->
-      buffer?.destroy()
-      modifiedHandler = null
-      doneFunc = null
-
-    describe "after the user changes buffer", ->
-      beforeEach (done) ->
-        doneFunc = done
-        modifiedHandler = jasmine.createSpy("modifiedHandler").and.callFake ->
-          doneFunc()
-        buffer.onDidChangeModified modifiedHandler
-
-        expect(buffer.isModified()).toBeFalsy()
-        buffer.insert([0,0], "hi")
-        expect(buffer.isModified()).toBe true
-
-      beforeEach (done) ->
-        expect(modifiedHandler).toHaveBeenCalledWith(true)
-
-        modifiedHandler.calls.reset()
-        buffer.insert([0,2], "ho")
-        setTimeout(->
-          expect(modifiedHandler).not.toHaveBeenCalled()
-          done()
-        , buffer.stoppedChangingDelay * 2)
-
-      it "reports the modified status changing to true or false", (done) ->
-        modifiedHandler.calls.reset()
-        doneFunc = ->
-          expect(modifiedHandler).toHaveBeenCalledWith(false)
-          done()
-        buffer.undo()
-        buffer.undo()
-
-    describe "after a modified buffer is saved", ->
-      beforeEach (done) ->
-        doneFunc = done
-        modifiedHandler = jasmine.createSpy("modifiedHandler").and.callFake ->
-          doneFunc()
-        buffer.onDidChangeModified modifiedHandler
-        buffer.insert([0,0], "hi")
-
-      it "reports the modified status changing to false", (done) ->
-        expect(buffer.isModified()).toBe true
-
-        modifiedHandler.calls.reset()
-        buffer.save()
-
-        expect(modifiedHandler).toHaveBeenCalledWith(false)
-        expect(buffer.isModified()).toBe false
-        modifiedHandler.calls.reset()
-        doneFunc = ->
-          expect(modifiedHandler).toHaveBeenCalledWith(true)
-          expect(buffer.isModified()).toBe true
-          done()
-        buffer.insert([0, 0], 'x')
-
-    describe "after a modified buffer is reloaded", ->
-      beforeEach (done) ->
-        doneFunc = done
-        modifiedHandler = jasmine.createSpy("modifiedHandler").and.callFake ->
-          doneFunc()
-        buffer.onDidChangeModified modifiedHandler
-        buffer.insert([0,0], "hi")
-
-      it "reports the modified status changing to false after a modified buffer is reloaded", ->
-        expect(buffer.isModified()).toBe true
-
-        modifiedHandler.calls.reset()
-        buffer.reload()
-
-        expect(modifiedHandler).toHaveBeenCalledWith(false)
-        expect(buffer.isModified()).toBe false
-
-        modifiedHandler.calls.reset()
-        doneFunc = ->
-          expect(modifiedHandler).toHaveBeenCalledWith(true)
-          expect(buffer.isModified()).toBe true
-          done()
-        buffer.insert([0, 0], 'x')
-
-    describe "after a buffer to a non-existent file is saved", ->
-      beforeEach (done) ->
-        buffer.destroy()
-        tempDir = temp.mkdirSync()
-        filePath = join(tempDir, 'atom-file')
-        expect(fs.existsSync(filePath)).toBeFalsy()
-
-        buffer = new TextBuffer({filePath, load: false})
-        buffer.load().then ->
-          done()
-
-      beforeEach (done) ->
-        doneFunc = done
-        modifiedHandler = jasmine.createSpy("modifiedHandler").and.callFake ->
-          doneFunc()
-        buffer.onDidChangeModified modifiedHandler
-        buffer.insert([0,0], "hi")
-
-      it "reports the modified status changing to false", (done) ->
-        expect(buffer.isModified()).toBe true
-
-        modifiedHandler.calls.reset()
-        buffer.save()
-
-        expect(fs.existsSync(filePath)).toBeTruthy()
-        expect(modifiedHandler).toHaveBeenCalledWith(false)
-        expect(buffer.isModified()).toBe false
-
-        modifiedHandler.calls.reset()
-        doneFunc = ->
-          expect(modifiedHandler).toHaveBeenCalledWith(true)
-          expect(buffer.isModified()).toBe true
-          done()
-        buffer.insert([0, 0], 'x')
-
-    it "returns false for an empty buffer with no path", ->
-      buffer.destroy()
-      buffer = new TextBuffer()
-      expect(buffer.isModified()).toBeFalsy()
-      buffer.append('hello')
-      expect(buffer.isModified()).toBeTruthy()
-
-    it "returns true for a non-empty buffer with no path", ->
-      buffer.destroy()
-      buffer = new TextBuffer({text: 'something'})
-      expect(buffer.isModified()).toBeTruthy()
-      buffer.append('a')
-      expect(buffer.isModified()).toBeTruthy()
-      buffer.setText('')
-      expect(buffer.isModified()).toBeFalsy()
-
-    it "returns false until the buffer is fully loaded", (done) ->
-      buffer.destroy()
-      buffer = new TextBuffer({filePath, load: false})
-      expect(buffer.isModified()).toBeFalsy()
-      buffer.load().then ->
-        expect(buffer.isModified()).toBeFalsy()
-        done()
-
   describe "::getLines()", ->
-    it "returns an array of lines in the text contents", (done) ->
+    it "returns an array of lines in the text contents", ->
       filePath = require.resolve('./fixtures/sample.js')
       fileContents = fs.readFileSync(filePath, 'utf8')
-      buffer = new TextBuffer({filePath, load: false})
-      buffer.load().then ->
-        expect(buffer.getLines().length).toBe fileContents.split("\n").length
-        expect(buffer.getLines().join('\n')).toBe fileContents
-        done()
+      buffer = new TextBuffer(fileContents)
+      expect(buffer.getLines().length).toBe fileContents.split("\n").length
+      expect(buffer.getLines().join('\n')).toBe fileContents
 
   describe "::change(range, string)", ->
     changeHandler = null
 
-    beforeEach (done) ->
+    beforeEach ->
       filePath = require.resolve('./fixtures/sample.js')
       fileContents = fs.readFileSync(filePath, 'utf8')
-      buffer = new TextBuffer({filePath, load: false})
-      buffer.load().then ->
-        changeHandler = jasmine.createSpy('changeHandler')
-        buffer.onDidChange changeHandler
-        done()
+      buffer = new TextBuffer(fileContents)
+      changeHandler = jasmine.createSpy('changeHandler')
+      buffer.onDidChange changeHandler
 
     describe "when used to insert (called with an empty range and a non-empty string)", ->
       describe "when the given string has no newlines", ->
@@ -1618,11 +1048,10 @@ describe "TextBuffer", ->
       expect(buffer.lineForRow(0)).toBe "var quicksort = function () {"
 
   describe "::setText(text)", ->
-    beforeEach (done) ->
+    beforeEach ->
       filePath = require.resolve('./fixtures/sample.js')
-      buffer = new TextBuffer({filePath, load: false})
-      buffer.load().then ->
-        done()
+      fileContents = fs.readFileSync(filePath, 'utf8')
+      buffer = new TextBuffer(filePath)
 
     describe "when the buffer contains newlines", ->
       it "changes the entire contents of the buffer and emits a change event", ->
@@ -1680,11 +1109,10 @@ describe "TextBuffer", ->
         expect(event.newRange).toEqual [[0, 0], [1, 8]]
 
   describe "::setTextViaDiff(text)", ->
-    beforeEach (done) ->
+    beforeEach ->
       filePath = require.resolve('./fixtures/sample.js')
-      buffer = new TextBuffer({filePath, load: false})
-      buffer.load().then ->
-        done()
+      fileContents = fs.readFileSync(filePath, 'utf8')
+      buffer = new TextBuffer(fileContents)
 
     it "can change the entire contents of the buffer when there are no newlines", ->
       buffer.setText('BUFFER CHANGE')
@@ -1760,219 +1188,11 @@ describe "TextBuffer", ->
         buffer.setTextViaDiff(originalText)
         expect(buffer.getText()).toBe originalText
 
-  describe "::save()", ->
-    saveBuffer = null
-
-    afterEach ->
-      saveBuffer?.destroy()
-
-    describe "when the buffer has a path", ->
-      filePath = null
-
-      beforeEach (done) ->
-        tempDir = temp.mkdirSync()
-        filePath = join(tempDir, 'temp.txt')
-        fs.writeFileSync(filePath, "")
-        saveBuffer = new TextBuffer({filePath, load: false})
-        saveBuffer.load().then ->
-          saveBuffer.setText("blah")
-          done()
-
-      it "saves the contents of the buffer to the path", ->
-        saveBuffer.setText 'Buffer contents!'
-        saveBuffer.save()
-        expect(fs.readFileSync(filePath, 'utf8')).toEqual 'Buffer contents!'
-
-      it "notifies ::onWillSave and ::onDidSave observers around the call to File::writeSync", ->
-        events = []
-        willSave1 = (event) -> events.push(['will-save-1', event])
-        willSave2 = (event) -> events.push(['will-save-2', event])
-        didSave1 = (event) -> events.push(['did-save-1', event])
-        didSave2 = (event) -> events.push(['did-save-2', event])
-
-        saveBuffer.onWillSave willSave1
-        saveBuffer.onWillSave willSave2
-        spyOn(File.prototype, 'writeSync').and.callFake -> events.push 'File::writeSync'
-        saveBuffer.onDidSave didSave1
-        saveBuffer.onDidSave didSave2
-
-        saveBuffer.save()
-        path = saveBuffer.getPath()
-        expect(events).toEqual [
-          ['will-save-1', {path}]
-          ['will-save-2', {path}]
-          'File::writeSync'
-          ['did-save-1', {path}]
-          ['did-save-2', {path}]
-        ]
-
-      it "notifies ::onWillReload and ::onDidReload observers when reloaded", ->
-        events = []
-
-        saveBuffer.onWillReload -> events.push 'will-reload'
-        saveBuffer.onDidReload -> events.push 'did-reload'
-        saveBuffer.reload()
-        expect(events).toEqual ['will-reload', 'did-reload']
-
-      describe "when a conflict is created", ->
-        beforeEach (done) ->
-          saveBuffer.setText('a')
-          saveBuffer.save()
-          saveBuffer.setText('ab')
-          saveBuffer.onDidConflict ->
-            done()
-          fs.writeFileSync(saveBuffer.getPath(), 'c')
-
-        it "no longer reports being in conflict when the buffer is saved again", ->
-          expect(saveBuffer.isInConflict()).toBe true
-          saveBuffer.save()
-          expect(saveBuffer.isInConflict()).toBe false
-
-    describe "when the buffer has no path", ->
-      it "throws an exception", (done) ->
-        saveBuffer = new TextBuffer({load: false})
-        saveBuffer.load().then ->
-          saveBuffer.setText "hi"
-          expect(-> saveBuffer.save()).toThrowError()
-          done()
-
-  describe "::reload()", ->
-    it "reloads current text from disk and clears any conflicts", (done) ->
+  describe "::getTextInRange(range)", ->
+    beforeEach ->
       filePath = require.resolve('./fixtures/sample.js')
       fileContents = fs.readFileSync(filePath, 'utf8')
-      buffer = new TextBuffer({filePath, load: false})
-      buffer.load().then ->
-        buffer.setText("abc")
-        buffer.conflict = true
-
-        buffer.reload()
-        expect(buffer.isModified()).toBeFalsy()
-        expect(buffer.isInConflict()).toBeFalsy()
-        expect(buffer.getText()).toBe(fileContents)
-        done()
-
-    it "does not throw if the buffer has no backing file", ->
-      buffer = new TextBuffer()
-      buffer.reload()
-
-  describe "::saveAs(path, {backup})", ->
-    [filePath, saveAsBuffer, tempDir] = []
-
-    beforeEach ->
-      tempDir = temp.mkdirSync()
-
-    afterEach ->
-      saveAsBuffer?.destroy()
-
-    it "saves the contents of the buffer to the path", ->
-      filePath = join(tempDir, 'temp.txt')
-      fs.removeSync(filePath)
-
-      saveAsBuffer = new TextBuffer()
-      eventHandler = jasmine.createSpy('eventHandler')
-      saveAsBuffer.onDidChangePath eventHandler
-
-      saveAsBuffer.setText 'Buffer contents!'
-      saveAsBuffer.saveAs(filePath)
-      expect(fs.readFileSync(filePath, 'utf8')).toEqual 'Buffer contents!'
-
-      expect(eventHandler).toHaveBeenCalledWith(filePath)
-
-    describe "when the path is changed", ->
-      [changeHandler, originalPath, newPath, saveAsBuffer, doneFunc] = []
-      beforeEach (done) ->
-        changeHandler = null
-        originalPath = join(tempDir, 'original.txt')
-        newPath = join(tempDir, 'new.txt')
-        fs.writeFileSync(originalPath, "")
-
-        saveAsBuffer = new TextBuffer({filePath: originalPath, load: false})
-        saveAsBuffer.load().then ->
-          done()
-
-      beforeEach (done) ->
-        doneFunc = ->
-          # No-op
-
-        changeHandler = jasmine.createSpy('changeHandler').and.callFake ->
-          doneFunc()
-        saveAsBuffer.onDidChange changeHandler
-        saveAsBuffer.saveAs(newPath)
-        expect(changeHandler).not.toHaveBeenCalled()
-
-        fs.writeFileSync(originalPath, "should not trigger buffer event")
-        setTimeout(->
-          expect(changeHandler).not.toHaveBeenCalled()
-          done()
-        , 20)
-
-      it "stops listening to events on previous path and begins listening to events on new path", (done) ->
-        doneFunc = ->
-          expect(changeHandler).toHaveBeenCalled()
-          done()
-        fs.writeFileSync(newPath, "should trigger buffer event")
-
-    describe "if the 'backup' option is true", ->
-      [backupFilePath, saveAsBuffer] = []
-
-      beforeEach ->
-        tempDir = temp.mkdirSync()
-        filePath = join(tempDir, 'temp.txt')
-        saveAsBuffer = new TextBuffer()
-        saveAsBuffer.setText 'Buffer contents'
-        backupFilePath = filePath + '~'
-        fs.removeSync(backupFilePath) if fs.existsSync(backupFilePath)
-
-      describe "if there is an existing file at the specified path", ->
-        beforeEach ->
-          fs.writeFileSync(filePath, 'File contents')
-
-        describe "if the file is written cleanly", ->
-          it "deletes the backup copy after writing", ->
-            saveAsBuffer.saveAs(filePath, backup: true)
-            expect(fs.readFileSync(filePath, 'utf8')).toBe 'Buffer contents'
-            expect(fs.existsSync(backupFilePath)).toBe false
-
-        describe "if an exception is thrown while writing to the file", ->
-          it "restores the file's original contents from the backup copy, preserves the backup copy just in case, and re-throws the exception", ->
-            saveAsBuffer.setPath(filePath)
-            originalWriteSync = saveAsBuffer.file.writeSync
-            saveAsBuffer.file.writeSync = (args...) ->
-              originalWriteSync.apply(saveAsBuffer.file, args)
-              throw new Error('Something broke')
-
-            expect(-> saveAsBuffer.saveAs(filePath, backup: true)).toThrowError 'Something broke'
-
-            expect(fs.readFileSync(filePath, 'utf8')).toBe 'File contents'
-            expect(fs.existsSync(backupFilePath)).toBe true
-
-        describe "if a file already exists at the default backup path", ->
-          it "chooses a different backup file name to avoid overwriting the existing file", ->
-            alternateBackupFilePath = backupFilePath + '~'
-            fs.removeSync(alternateBackupFilePath) if fs.existsSync(alternateBackupFilePath)
-
-            fs.writeFileSync(backupFilePath, 'Contents of file at default backup path')
-
-            saveAsBuffer.saveAs(filePath, backup: true)
-            expect(fs.readFileSync(filePath, 'utf8')).toBe 'Buffer contents'
-            expect(fs.readFileSync(backupFilePath, 'utf8')).toBe 'Contents of file at default backup path'
-            expect(fs.existsSync(backupFilePath)).toBe true
-            expect(fs.existsSync(alternateBackupFilePath)).toBe false
-
-      describe "if no file exists at the path", ->
-        it "does not make a backup before writing", ->
-          fs.removeSync(filePath) if fs.existsSync(filePath)
-          expect(fs.existsSync(filePath)).toBe false
-          expect(fs.existsSync(backupFilePath)).toBe false
-          saveAsBuffer.saveAs(filePath, backup: true)
-          expect(fs.existsSync(backupFilePath)).toBe false
-
-  describe "::getTextInRange(range)", ->
-    beforeEach (done) ->
-      filePath = require.resolve('./fixtures/sample.js')
-      buffer = new TextBuffer({filePath, load: false})
-      buffer.load().then ->
-        done()
+      buffer = new TextBuffer(fileContents)
 
     describe "when range is empty", ->
       it "returns an empty string", ->
@@ -2008,8 +1228,9 @@ describe "TextBuffer", ->
 
   describe "::scan(regex, fn)", ->
     beforeEach ->
-      buffer = new TextBuffer(filePath: require.resolve('./fixtures/sample.js'))
-      buffer.loadSync()
+      filePath = require.resolve('./fixtures/sample.js')
+      fileContents = fs.readFileSync(filePath, 'utf8')
+      buffer = new TextBuffer(fileContents)
 
     it "calls the given function with the information about each match", ->
       matches = []
@@ -2028,8 +1249,9 @@ describe "TextBuffer", ->
 
   describe "::backwardsScan(regex, fn)", ->
     beforeEach ->
-      buffer = new TextBuffer(filePath: require.resolve('./fixtures/sample.js'))
-      buffer.loadSync()
+      filePath = require.resolve('./fixtures/sample.js')
+      fileContents = fs.readFileSync(filePath, 'utf8')
+      buffer = new TextBuffer(fileContents)
 
     it "calls the given function with the information about each match in backwards order", ->
       matches = []
@@ -2047,11 +1269,10 @@ describe "TextBuffer", ->
       expect(matches[1].lineTextOffset).toBe 0
 
   describe "::scanInRange(range, regex, fn)", ->
-    beforeEach (done) ->
+    beforeEach ->
       filePath = require.resolve('./fixtures/sample.js')
-      buffer = new TextBuffer({filePath, load: false})
-      buffer.load().then ->
-        done()
+      fileContents = fs.readFileSync(filePath, 'utf8')
+      buffer = new TextBuffer(fileContents)
 
     describe "when given a regex with a ignore case flag", ->
       it "does a case-insensitive search", ->
@@ -2164,11 +1385,10 @@ describe "TextBuffer", ->
         expect(ranges.length).toBe 2
 
   describe "::backwardsScanInRange(range, regex, fn)", ->
-    beforeEach (done) ->
+    beforeEach ->
       filePath = require.resolve('./fixtures/sample.js')
-      buffer = new TextBuffer({filePath, load: false})
-      buffer.load().then ->
-        done()
+      fileContents = fs.readFileSync(filePath, 'utf8')
+      buffer = new TextBuffer(fileContents)
 
     describe "when given a regex with no global flag", ->
       it "calls the iterator with the last match for the given regex in the given range", ->
@@ -2341,11 +1561,10 @@ describe "TextBuffer", ->
             expect(buffer.getText()).toBe(referenceBuffer.getText(), "Seed: #{seed}")
 
   describe "::characterIndexForPosition(position)", ->
-    beforeEach (done) ->
+    beforeEach ->
       filePath = require.resolve('./fixtures/sample.js')
-      buffer = new TextBuffer({filePath, load: false})
-      buffer.load().then ->
-        done()
+      fileContents = fs.readFileSync(filePath, 'utf8')
+      buffer = new TextBuffer(fileContents)
 
     it "returns the total number of characters that precede the given position", ->
       expect(buffer.characterIndexForPosition([0, 0])).toBe 0
@@ -2364,11 +1583,10 @@ describe "TextBuffer", ->
         expect(buffer.characterIndexForPosition([3])).toBe 20
 
   describe "::positionForCharacterIndex(position)", ->
-    beforeEach (done) ->
+    beforeEach ->
       filePath = require.resolve('./fixtures/sample.js')
-      buffer = new TextBuffer({filePath, load: false})
-      buffer.load().then ->
-        done()
+      fileContents = fs.readFileSync(filePath, 'utf8')
+      buffer = new TextBuffer(fileContents)
 
     it "returns the position based on character index", ->
       expect(buffer.positionForCharacterIndex(0)).toEqual [0, 0]
@@ -2386,11 +1604,10 @@ describe "TextBuffer", ->
         expect(buffer.positionForCharacterIndex(20)).toEqual [3, 0]
 
   describe "::isEmpty()", ->
-    beforeEach (done) ->
+    beforeEach ->
       filePath = require.resolve('./fixtures/sample.js')
-      buffer = new TextBuffer({filePath, load: false})
-      buffer.load().then ->
-        done()
+      fileContents = fs.readFileSync(filePath, 'utf8')
+      buffer = new TextBuffer(fileContents)
 
     it "returns true for an empty buffer", ->
       buffer.setText('')
@@ -2405,11 +1622,10 @@ describe "TextBuffer", ->
       expect(buffer.isEmpty()).toBeFalsy()
 
   describe "::onDidChangeText(callback)",  ->
-    beforeEach (done) ->
+    beforeEach ->
       filePath = require.resolve('./fixtures/sample.js')
-      buffer = new TextBuffer({filePath, load: false})
-      buffer.load().then ->
-        done()
+      fileContents = fs.readFileSync(filePath, 'utf8')
+      buffer = new TextBuffer(fileContents)
 
     it "notifies observers after a transaction, an undo or a redo", ->
       textChanges = []
@@ -2510,11 +1726,10 @@ describe "TextBuffer", ->
 
   describe "::onDidStopChanging(callback)", ->
     [delay, didStopChangingCallback] = []
-    beforeEach (done) ->
+    beforeEach ->
       filePath = require.resolve('./fixtures/sample.js')
-      buffer = new TextBuffer({filePath, load: false})
-      buffer.load().then ->
-        done()
+      fileContents = fs.readFileSync(filePath, 'utf8')
+      buffer = new TextBuffer(fileContents)
 
     beforeEach (done) ->
       delay = buffer.stoppedChangingDelay
@@ -2576,11 +1791,10 @@ describe "TextBuffer", ->
         expect(didStopChangingCallback).toHaveBeenCalled()
 
   describe "::append(text)", ->
-    beforeEach (done) ->
+    beforeEach ->
       filePath = require.resolve('./fixtures/sample.js')
-      buffer = new TextBuffer({filePath, load: false})
-      buffer.load().then ->
-        done()
+      fileContents = fs.readFileSync(filePath, 'utf8')
+      buffer = new TextBuffer(fileContents)
 
     it "adds text to the end of the buffer", ->
       buffer.setText("")
@@ -2590,11 +1804,10 @@ describe "TextBuffer", ->
       expect(buffer.getText()).toBe "ab\nc"
 
   describe "line ending support", ->
-    beforeEach (done) ->
+    beforeEach ->
       filePath = require.resolve('./fixtures/sample.js')
-      buffer = new TextBuffer({filePath, load: false})
-      buffer.load().then ->
-        done()
+      fileContents = fs.readFileSync(filePath, 'utf8')
+      buffer = new TextBuffer(fileContents)
 
     describe ".getText()", ->
       it "returns the text with the corrent line endings for each row", ->
@@ -2654,63 +1867,29 @@ describe "TextBuffer", ->
         expect(bufferB.getPreferredLineEnding()).toBe "\r\n"
 
   describe "character set encoding support", ->
-    it "allows the encoding to be set on creation", (done) ->
+    it "allows the encoding to be set on creation", ->
       filePath = join(__dirname, 'fixtures', 'win1251.txt')
-      buffer = new TextBuffer({filePath, load: false, encoding: 'win1251'})
-      buffer.load().then ->
-        expect(buffer.getEncoding()).toBe 'win1251'
-        expect(buffer.getText()).toBe 'тест 1234 абвгдеёжз'
-        done()
+      fileContents = iconv.decode(fs.readFileSync(filePath), 'win1251')
+      buffer = new TextBuffer({encoding: 'win1251'})
+      buffer.setText(fileContents)
+      expect(buffer.getEncoding()).toBe 'win1251'
+      expect(buffer.getText()).toBe 'тест 1234 абвгдеёжз'
 
-    it "serializes the encoding", (done) ->
+    it "serializes the encoding", ->
       filePath = join(__dirname, 'fixtures', 'win1251.txt')
-      bufferA = new TextBuffer({filePath, load: false, encoding: 'win1251'})
-      bufferA.load().then ->
-        bufferB = TextBuffer.deserialize(bufferA.serialize())
-        expect(bufferB.getEncoding()).toBe 'win1251'
-        expect(bufferB.getText()).toBe 'тест 1234 абвгдеёжз'
-        done()
-
-    describe "when the buffer is modified", ->
-      describe "when the encoding of the buffer is changed", ->
-        beforeEach (done) ->
-          filePath = join(__dirname, 'fixtures', 'win1251.txt')
-          buffer = new TextBuffer({filePath, load: false})
-          buffer.load().then ->
-            done()
-
-        it "does not reload the contents from the disk", ->
-          spyOn(buffer, 'updateCachedDiskContents')
-          buffer.setText('ch ch changes')
-          buffer.setEncoding('win1251')
-          expect(buffer.updateCachedDiskContents.calls.count()).toBe 0
-
-    describe "when the buffer is unmodified", ->
-      describe "when the encoding of the buffer is changed", ->
-        beforeEach (done) ->
-          filePath = join(__dirname, 'fixtures', 'win1251.txt')
-          buffer = new TextBuffer({filePath, load: false})
-          buffer.load().then ->
-            done()
-
-        beforeEach (done) ->
-          expect(buffer.getEncoding()).toBe 'utf8'
-          expect(buffer.getText()).not.toBe 'тест 1234 абвгдеёжз'
-
-          reloadHandler = ->
-            done()
-          buffer.setEncoding('win1251')
-          expect(buffer.getEncoding()).toBe 'win1251'
-          buffer.onDidReload(reloadHandler)
-
-        it "reloads the contents from the disk", ->
-          expect(buffer.getText()).toBe 'тест 1234 абвгдеёжз'
+      fileContents = iconv.decode(fs.readFileSync(filePath), 'win1251')
+      bufferA = new TextBuffer({encoding: 'win1251'})
+      bufferA.setText(fileContents)
+      bufferB = TextBuffer.deserialize(bufferA.serialize())
+      expect(bufferB.getEncoding()).toBe 'win1251'
+      expect(bufferB.getText()).toBe 'тест 1234 абвгдеёжз'
 
     it "emits an event when the encoding changes", ->
       filePath = join(__dirname, 'fixtures', 'win1251.txt')
+      fileContents = iconv.decode(fs.readFileSync(filePath), 'win1251')
       encodingChangeHandler = jasmine.createSpy('encodingChangeHandler')
 
-      buffer = new TextBuffer({filePath, load: true})
+      buffer = new TextBuffer(fileContents)
       buffer.onDidChangeEncoding(encodingChangeHandler)
       buffer.setEncoding('win1251')
       expect(encodingChangeHandler).toHaveBeenCalledWith('win1251')
@@ -2729,17 +1908,3 @@ describe "TextBuffer", ->
       encodingChangeHandler.calls.reset()
       buffer.setEncoding('win1251')
       expect(encodingChangeHandler.calls.count()).toBe 0
-
-    describe "when a buffer's encoding is changed", ->
-      beforeEach (done) ->
-        filePath = join(__dirname, 'fixtures', 'win1251.txt')
-        buffer = new TextBuffer({filePath, load: false})
-        reloadHandler = ->
-          done()
-        buffer.load().then ->
-          buffer.onDidReload(reloadHandler)
-          buffer.setEncoding('win1251')
-
-      it "does not push the encoding change onto the undo stack", ->
-        buffer.undo()
-        expect(buffer.getText()).toBe 'тест 1234 абвгдеёжз'
