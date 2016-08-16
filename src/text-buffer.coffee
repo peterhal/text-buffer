@@ -1,10 +1,7 @@
 {Emitter, CompositeDisposable, Disposable} = require 'event-kit'
-{File} = require 'pathwatcher'
 SpanSkipList = require 'span-skip-list'
 diff = require 'diff'
 _ = require 'underscore-plus'
-fs = require 'fs-plus'
-path = require 'path'
 crypto = require 'crypto'
 Patch = require 'atom-patch'
 Point = require './point'
@@ -68,11 +65,7 @@ class TextBuffer
   encoding: null
   stoppedChangingDelay: 300
   stoppedChangingTimeout: null
-  cachedDiskContents: null
-  conflict: false
-  file: null
   refcount: 0
-  fileSubscriptions: null
   backwardsScanChunkSize: 8000
   defaultMaxUndoEntries: 10000
   changeCount: 0
@@ -85,8 +78,6 @@ class TextBuffer
   # Public: Create a new buffer with the given params.
   #
   # * `params` {Object} or {String} of text
-  #   * `load` A {Boolean}, `true` to asynchronously load the buffer from disk
-  #     after initialization.
   #   * `text` The initial {String} text of the buffer.
   constructor: (params) ->
     @eventIdCounter = 0
@@ -115,12 +106,7 @@ class TextBuffer
     @setEncoding(params?.encoding)
     @setPreferredLineEnding(params?.preferredLineEnding)
 
-    @loaded = false
     @transactCallDepth = 0
-    @digestWhenLastPersisted = params?.digestWhenLastPersisted ? false
-
-    @setPath(params.filePath) if params?.filePath
-    @load() if params?.load
 
   @deserialize: (params) ->
     return if params.version isnt TextBuffer.prototype.version
@@ -132,7 +118,6 @@ class TextBuffer
     params.markerLayers = markerLayers
     params.defaultMarkerLayer = params.markerLayers[params.defaultMarkerLayerId]
     params.history = History.deserialize(params.history, buffer)
-    params.load = true if params.filePath
     TextBuffer.call(buffer, params)
     displayLayers = {}
     for layerId, layerState of params.displayLayers
@@ -166,8 +151,6 @@ class TextBuffer
     nextDisplayLayerId: @nextDisplayLayerId
     history: @history.serialize(options)
     encoding: @getEncoding()
-    filePath: @getPath()
-    digestWhenLastPersisted: @file?.getDigestSync()
     preferredLineEnding: @preferredLineEnding
     nextMarkerId: @nextMarkerId
 
@@ -230,24 +213,6 @@ class TextBuffer
   onDidStopChanging: (callback) ->
     @emitter.on 'did-stop-changing', callback
 
-  # Public: Invoke the given callback when the in-memory contents of the
-  # buffer become in conflict with the contents of the file on disk.
-  #
-  # * `callback` {Function} to be called when the buffer enters conflict.
-  #
-  # Returns a {Disposable} on which `.dispose()` can be called to unsubscribe.
-  onDidConflict: (callback) ->
-    @emitter.on 'did-conflict', callback
-
-  # Public: Invoke the given callback if the value of {::isModified} changes.
-  #
-  # * `callback` {Function} to be called when {::isModified} changes.
-  #   * `modified` {Boolean} indicating whether the buffer is modified.
-  #
-  # Returns a {Disposable} on which `.dispose()` can be called to unsubscribe.
-  onDidChangeModified: (callback) ->
-    @emitter.on 'did-change-modified', callback
-
   # Public: Invoke the given callback when all marker `::onDidChange`
   # observers have been notified following a change to the buffer.
   #
@@ -278,15 +243,6 @@ class TextBuffer
   onDidCreateMarker: (callback) ->
     @emitter.on 'did-create-marker', callback
 
-  # Public: Invoke the given callback when the value of {::getPath} changes.
-  #
-  # * `callback` {Function} to be called when the path changes.
-  #   * `path` {String} representing the buffer's current path on disk.
-  #
-  # Returns a {Disposable} on which `.dispose()` can be called to unsubscribe.
-  onDidChangePath: (callback) ->
-    @emitter.on 'did-change-path', callback
-
   # Public: Invoke the given callback when the value of {::getEncoding} changes.
   #
   # * `callback` {Function} to be called when the encoding changes.
@@ -296,51 +252,6 @@ class TextBuffer
   onDidChangeEncoding: (callback) ->
     @emitter.on 'did-change-encoding', callback
 
-  # Public: Invoke the given callback before the buffer is saved to disk.
-  #
-  # * `callback` {Function} to be called before the buffer is saved.
-  #
-  # Returns a {Disposable} on which `.dispose()` can be called to unsubscribe.
-  onWillSave: (callback) ->
-    @emitter.on 'will-save', callback
-
-  # Public: Invoke the given callback after the buffer is saved to disk.
-  #
-  # * `callback` {Function} to be called after the buffer is saved.
-  #   * `event` {Object} with the following keys:
-  #     * `path` The path to which the buffer was saved.
-  #
-  # Returns a {Disposable} on which `.dispose()` can be called to unsubscribe.
-  onDidSave: (callback) ->
-    @emitter.on 'did-save', callback
-
-  # Public: Invoke the given callback after the file backing the buffer is
-  # deleted.
-  #
-  # * `callback` {Function} to be called after the buffer is deleted.
-  #
-  # Returns a {Disposable} on which `.dispose()` can be called to unsubscribe.
-  onDidDelete: (callback) ->
-    @emitter.on 'did-delete', callback
-
-  # Public: Invoke the given callback before the buffer is reloaded from the
-  # contents of its file on disk.
-  #
-  # * `callback` {Function} to be called before the buffer is reloaded.
-  #
-  # Returns a {Disposable} on which `.dispose()` can be called to unsubscribe.
-  onWillReload: (callback) ->
-    @emitter.on 'will-reload', callback
-
-  # Public: Invoke the given callback after the buffer is reloaded from the
-  # contents of its file on disk.
-  #
-  # * `callback` {Function} to be called after the buffer is reloaded.
-  #
-  # Returns a {Disposable} on which `.dispose()` can be called to unsubscribe.
-  onDidReload: (callback) ->
-    @emitter.on 'did-reload', callback
-
   # Public: Invoke the given callback when the buffer is destroyed.
   #
   # * `callback` {Function} to be called when the buffer is destroyed.
@@ -348,19 +259,6 @@ class TextBuffer
   # Returns a {Disposable} on which `.dispose()` can be called to unsubscribe.
   onDidDestroy: (callback) ->
     @emitter.on 'did-destroy', callback
-
-  # Public: Invoke the given callback when there is an error in watching the
-  # file.
-  #
-  # * `callback` {Function} callback
-  #   * `errorObject` {Object}
-  #     * `error` {Object} the error object
-  #     * `handle` {Function} call this to indicate you have handled the error.
-  #       The error will not be thrown if this function is called.
-  #
-  # Returns a {Disposable} on which `.dispose()` can be called to unsubscribe.
-  onWillThrowWatchError: (callback) ->
-    @emitter.on 'will-throw-watch-error', callback
 
   # Public: Get the number of milliseconds that will elapse without a change
   # before {::onDidStopChanging} observers are invoked following a change.
@@ -372,50 +270,6 @@ class TextBuffer
   Section: File Details
   ###
 
-  # Public: Determine if the in-memory contents of the buffer differ from its
-  # contents on disk.
-  #
-  # If the buffer is unsaved, always returns `true` unless the buffer is empty.
-  #
-  # Returns a {Boolean}.
-  isModified: ->
-    if @file
-      return false unless @loaded
-
-      if @file.existsSync()
-        @getText() != @cachedDiskContents
-      else
-        @wasModifiedBeforeRemove ? not @isEmpty()
-    else
-      not @isEmpty()
-
-  # Public: Determine if the in-memory contents of the buffer conflict with the
-  # on-disk contents of its associated file.
-  #
-  # Returns a {Boolean}.
-  isInConflict: -> @conflict
-
-  # Public: Get the path of the associated file.
-  #
-  # Returns a {String}.
-  getPath: ->
-    @file?.getPath()
-
-  # Public: Set the path for the buffer's associated file.
-  #
-  # * `filePath` A {String} representing the new file path
-  setPath: (filePath) ->
-    return if filePath == @getPath()
-
-    if filePath
-      @file = new File(filePath)
-      @file.setEncoding(@getEncoding())
-      @subscribeToFile()
-    else
-      @file = null
-
-    @emitter.emit 'did-change-path', @getPath()
-
   # Public: Sets the character set encoding for this buffer.
   #
   # * `encoding` The {String} encoding to use (default: 'utf8').
@@ -423,40 +277,18 @@ class TextBuffer
     return if encoding is @getEncoding()
 
     @encoding = encoding
-    if @file?
-      @file.setEncoding(encoding)
-      @emitter.emit 'did-change-encoding', encoding
-
-      unless @isModified()
-        @updateCachedDiskContents true, => @reload(true)
-    else
-      @emitter.emit 'did-change-encoding', encoding
+    @emitter.emit 'did-change-encoding', encoding
 
     return
 
   # Public: Returns the {String} encoding of this buffer.
-  getEncoding: -> @encoding ? @file?.getEncoding()
+  getEncoding: -> @encoding
 
   setPreferredLineEnding: (preferredLineEnding=null) ->
     @preferredLineEnding = preferredLineEnding
 
   getPreferredLineEnding: ->
     @preferredLineEnding
-
-  # Public: Get the path of the associated file.
-  #
-  # Returns a {String}.
-  getUri: ->
-    @getPath()
-
-  # Get the basename of the associated file.
-  #
-  # The basename is the name portion of the file's path, without the containing
-  # directories.
-  #
-  # Returns a {String}.
-  getBaseName: ->
-    @file?.getBaseName()
 
   ###
   Section: Reading Text
@@ -758,8 +590,6 @@ class TextBuffer
       newExtent = newRange.getExtent()
       for id, markerLayer of @markerLayers
         markerLayer.splice(oldRange.start, oldExtent, newExtent)
-
-    @conflict = false if @conflict and !@isModified()
 
     @changeCount++
     @emitDidChangeEvent(changeEvent)
@@ -1200,15 +1030,12 @@ class TextBuffer
   #
   # Returns a {Number} representing the number of replacements made.
   replace: (regex, replacementText) ->
-    doSave = !@isModified()
     replacements = 0
 
     @transact =>
       @scan regex, ({matchText, replace}) ->
         replace(matchText.replace(regex, replacementText))
         replacements++
-
-    @save() if doSave
 
     replacements
 
@@ -1352,88 +1179,6 @@ class TextBuffer
       position
 
   ###
-  Section: Buffer Operations
-  ###
-
-  # Public: Save the buffer.
-  save: (options) ->
-    @saveAs(@getPath(), options)
-
-  # Public: Save the buffer at a specific path.
-  #
-  # * `filePath` The path to save at.
-  saveAs: (filePath, options) ->
-    unless filePath then throw new Error("Can't save buffer with no file path")
-
-    @emitter.emit 'will-save', {path: filePath}
-    @setPath(filePath)
-
-    if options?.backup
-      backupFile = @backUpFileContentsBeforeWriting()
-
-    try
-      @file.writeSync(@getText())
-      if backupFile?
-        backupFile.safeRemoveSync()
-    catch error
-      if backupFile?
-        @file.writeSync(backupFile.readSync())
-      throw error
-
-    @cachedDiskContents = @getText()
-    @conflict = false
-    @emitModifiedStatusChanged(false)
-    @emitter.emit 'did-save', {path: filePath}
-
-  # Public: Reload the buffer's contents from disk.
-  #
-  # Sets the buffer's content to the cached disk contents
-  reload: (clearHistory=false) ->
-    @emitter.emit 'will-reload'
-    if clearHistory
-      @clearUndoStack()
-      @setTextInRange(@getRange(), @cachedDiskContents ? "", normalizeLineEndings: false, undo: 'skip')
-    else
-      @setTextViaDiff(@cachedDiskContents ? "")
-    @emitModifiedStatusChanged(false)
-    @emitter.emit 'did-reload'
-
-  # Rereads the contents of the file, and stores them in the cache.
-  updateCachedDiskContentsSync: ->
-    @cachedDiskContents = @file?.readSync() ? ""
-
-  # Rereads the contents of the file, and stores them in the cache.
-  #
-  # * `flushCache` (optional) {Boolean} flush option to pass through to
-  #                {File::read} (default: false).
-  # * `callback`   (optional) {Function} to call after the cached contents have
-  #                been updated.
-  updateCachedDiskContents: (flushCache=false, callback) ->
-    if @file?
-      promise = @file.read(flushCache)
-    else
-      promise = Promise.resolve("")
-
-    promise.then (contents) =>
-      @cachedDiskContents = contents
-      callback?()
-
-  backUpFileContentsBeforeWriting: ->
-    return unless @file.existsSync()
-
-    backupFilePath = @getPath() + '~'
-
-    maxTildes = 10
-    while fs.existsSync(backupFilePath)
-      if --maxTildes is 0
-        throw new Error("Can't create a backup file for #{@getPath()} because files already exist at every candidate path.")
-      backupFilePath += '~'
-
-    file = new File(backupFilePath, false, false)
-    file.safeWriteSync(@file.readSync())
-    file
-
-  ###
   Section: Display Layers
   ###
 
@@ -1454,26 +1199,9 @@ class TextBuffer
   Section: Private Utility Methods
   ###
 
-  loadSync: ->
-    @updateCachedDiskContentsSync()
-    @finishLoading()
-
-  load: ->
-    @updateCachedDiskContents().then => @finishLoading()
-
-  finishLoading: ->
-    if @isAlive()
-      @loaded = true
-      if @digestWhenLastPersisted is @file?.getDigestSync()
-        @emitModifiedStatusChanged(@isModified())
-      else
-        @reload(true)
-    this
-
   destroy: ->
     unless @destroyed
       @cancelStoppedChangingTimeout()
-      @fileSubscriptions?.dispose()
       @destroyed = true
       @emitter.emit 'did-destroy'
 
@@ -1491,40 +1219,6 @@ class TextBuffer
     @refcount--
     @destroy() unless @isRetained()
     this
-
-  subscribeToFile: ->
-    @fileSubscriptions?.dispose()
-    @fileSubscriptions = new CompositeDisposable
-
-    @fileSubscriptions.add @file.onDidChange =>
-      @conflict = true if @isModified()
-      previousContents = @cachedDiskContents
-
-      # Synchrounously update the disk contents because the {File} has already cached them. If the
-      # contents updated asynchrounously multiple `conflict` events could trigger for the same disk
-      # contents.
-      @updateCachedDiskContentsSync()
-      return if previousContents == @cachedDiskContents
-
-      if @conflict
-        @emitter.emit 'did-conflict'
-      else
-        @reload()
-
-    @fileSubscriptions.add @file.onDidDelete =>
-      modified = @getText() != @cachedDiskContents
-      @wasModifiedBeforeRemove = modified
-      @emitter.emit 'did-delete'
-      if modified
-        @updateCachedDiskContents()
-      else
-        @destroy()
-
-    @fileSubscriptions.add @file.onDidRename =>
-      @emitter.emit 'did-change-path', @getPath()
-
-    @fileSubscriptions.add @file.onWillThrowWatchError (errorObject) =>
-      @emitter.emit 'will-throw-watch-error', errorObject
 
   createMarkerSnapshot: ->
     snapshot = {}
@@ -1562,16 +1256,9 @@ class TextBuffer
     @cancelStoppedChangingTimeout()
     stoppedChangingCallback = =>
       @stoppedChangingTimeout = null
-      modifiedStatus = @isModified()
       @emitter.emit 'did-stop-changing', {changes: Object.freeze(normalizePatchChanges(Patch.compose(@patchesSinceLastStoppedChangingEvent).getChanges()))}
       @patchesSinceLastStoppedChangingEvent = []
-      @emitModifiedStatusChanged(modifiedStatus)
     @stoppedChangingTimeout = setTimeout(stoppedChangingCallback, @stoppedChangingDelay)
-
-  emitModifiedStatusChanged: (modifiedStatus) ->
-    return if modifiedStatus is @previousModifiedStatus
-    @previousModifiedStatus = modifiedStatus
-    @emitter.emit 'did-change-modified', modifiedStatus
 
   logLines: (start=0, end=@getLastRow())->
     for row in [start..end]
