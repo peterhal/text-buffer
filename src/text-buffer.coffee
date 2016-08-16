@@ -7,9 +7,7 @@ Patch = require 'atom-patch'
 Point = require './point'
 Range = require './range'
 History = require './history'
-MarkerLayer = require './marker-layer'
 MatchIterator = require './match-iterator'
-DisplayLayer = require './display-layer'
 {spliceArray, newlineRegex, normalizePatchChanges} = require './helpers'
 
 class SearchCallbackArgument
@@ -69,7 +67,6 @@ class TextBuffer
   backwardsScanChunkSize: 8000
   defaultMaxUndoEntries: 10000
   changeCount: 0
-  nextMarkerLayerId: 0
 
   ###
   Section: Construction
@@ -92,13 +89,6 @@ class TextBuffer
     @setTextInRange([[0, 0], [0, 0]], text ? params?.text ? '', normalizeLineEndings: false)
     maxUndoEntries = params?.maxUndoEntries ? @defaultMaxUndoEntries
     @history = params?.history ? new History(this, maxUndoEntries)
-    @nextMarkerLayerId = params?.nextMarkerLayerId ? 0
-    @nextDisplayLayerId = params?.nextDisplayLayerId ? 0
-    @defaultMarkerLayer = params?.defaultMarkerLayer ? new MarkerLayer(this, String(@nextMarkerLayerId++))
-    @displayLayers = {}
-    @markerLayers = params?.markerLayers ? {}
-    @markerLayers[@defaultMarkerLayer.id] = @defaultMarkerLayer
-    @nextMarkerId = params?.nextMarkerId ? 1
 
     @setEncoding(params?.encoding)
     @setPreferredLineEnding(params?.preferredLineEnding)
@@ -109,17 +99,8 @@ class TextBuffer
     return if params.version isnt TextBuffer.prototype.version
 
     buffer = Object.create(TextBuffer.prototype)
-    markerLayers = {}
-    for layerId, layerState of params.markerLayers
-      markerLayers[layerId] = MarkerLayer.deserialize(buffer, layerState)
-    params.markerLayers = markerLayers
-    params.defaultMarkerLayer = params.markerLayers[params.defaultMarkerLayerId]
     params.history = History.deserialize(params.history, buffer)
     TextBuffer.call(buffer, params)
-    displayLayers = {}
-    for layerId, layerState of params.displayLayers
-      displayLayers[layerId] = DisplayLayer.deserialize(buffer, layerState)
-    buffer.setDisplayLayers(displayLayers)
     buffer
 
   # Returns a {String} representing a unique identifier for this {TextBuffer}.
@@ -128,28 +109,12 @@ class TextBuffer
 
   serialize: (options) ->
     options ?= {}
-    options.markerLayers ?= true
-
-    markerLayers = {}
-    if options.markerLayers
-      for id, layer of @markerLayers when layer.persistent
-        markerLayers[id] = layer.serialize()
-
-    displayLayers = {}
-    for id, layer of @displayLayers
-      displayLayers[id] = layer.serialize()
 
     id: @getId()
     text: @getText()
-    defaultMarkerLayerId: @defaultMarkerLayer.id
-    markerLayers: markerLayers
-    displayLayers: displayLayers
-    nextMarkerLayerId: @nextMarkerLayerId
-    nextDisplayLayerId: @nextDisplayLayerId
     history: @history.serialize(options)
     encoding: @getEncoding()
     preferredLineEnding: @preferredLineEnding
-    nextMarkerId: @nextMarkerId
 
   ###
   Section: Event Subscription
@@ -209,36 +174,6 @@ class TextBuffer
   # Returns a {Disposable} on which `.dispose()` can be called to unsubscribe.
   onDidStopChanging: (callback) ->
     @emitter.on 'did-stop-changing', callback
-
-  # Public: Invoke the given callback when all marker `::onDidChange`
-  # observers have been notified following a change to the buffer.
-  #
-  # The order of events following a buffer change is as follows:
-  #
-  # * The text of the buffer is changed
-  # * All markers are updated accordingly, but their `::onDidChange` observers
-  #   are not notified.
-  # * `TextBuffer::onDidChange` observers are notified.
-  # * `Marker::onDidChange` observers are notified.
-  # * `TextBuffer::onDidUpdateMarkers` observers are notified.
-  #
-  # Basically, this method gives you a way to take action after both a buffer
-  # change and all associated marker changes.
-  #
-  # * `callback` {Function} to be called after markers are updated.
-  #
-  # Returns a {Disposable} on which `.dispose()` can be called to unsubscribe.
-  onDidUpdateMarkers: (callback) ->
-    @emitter.on 'did-update-markers', callback
-
-  # Public: Invoke the given callback when a marker is created.
-  #
-  # * `callback` {Function} to be called when a marker is created.
-  #   * `marker` {Marker} that was created.
-  #
-  # Returns a {Disposable} on which `.dispose()` can be called to unsubscribe.
-  onDidCreateMarker: (callback) ->
-    @emitter.on 'did-create-marker', callback
 
   # Public: Invoke the given callback when the value of {::getEncoding} changes.
   #
@@ -582,12 +517,6 @@ class TextBuffer
       {rows: 1, characters: line.length + lineEndings[index].length}
     @offsetIndex.spliceArray('rows', startRow, rowCount, offsets)
 
-    if @markerLayers?
-      oldExtent = oldRange.getExtent()
-      newExtent = newRange.getExtent()
-      for id, markerLayer of @markerLayers
-        markerLayer.splice(oldRange.start, oldExtent, newExtent)
-
     @changeCount++
     @emitter.emit 'did-change', changeEvent
 
@@ -643,150 +572,6 @@ class TextBuffer
     @delete(new Range(startPoint, endPoint))
 
   ###
-  Section: Markers
-  ###
-
-  # Public: Create a layer to contain a set of related markers.
-  #
-  # * `options` An object contaning the following keys:
-  #   * `maintainHistory` A {Boolean} indicating whether or not the state of
-  #     this layer should be restored on undo/redo operations. Defaults to
-  #     `false`.
-  #   * `persistent` A {Boolean} indicating whether or not this marker layer
-  #     should be serialized and deserialized along with the rest of the
-  #     buffer. Defaults to `false`. If `true`, the marker layer's id will be
-  #     maintained across the serialization boundary, allowing you to retrieve
-  #     it via {::getMarkerLayer}.
-  #
-  # Returns a {MarkerLayer}.
-  addMarkerLayer: (options) ->
-    layer = new MarkerLayer(this, String(@nextMarkerLayerId++), options)
-    @markerLayers[layer.id] = layer
-    layer
-
-  # Public: Get a {MarkerLayer} by id.
-  #
-  # * `id` The id of the marker layer to retrieve.
-  #
-  # Returns a {MarkerLayer} or `undefined` if no layer exists with the given
-  # id.
-  getMarkerLayer: (id) ->
-    @markerLayers[id]
-
-  # Public: Get the default {MarkerLayer}.
-  #
-  # All marker APIs not tied to an explicit layer interact with this default
-  # layer.
-  #
-  # Returns a {MarkerLayer}.
-  getDefaultMarkerLayer: ->
-    @defaultMarkerLayer
-
-  # Public: Create a marker with the given range in the default marker layer.
-  # This marker will maintain its logical location as the buffer is changed, so
-  # if you mark a particular word, the marker will remain over that word even if
-  # the word's location in the buffer changes.
-  #
-  # * `range` A {Range} or range-compatible {Array}
-  # * `properties` A hash of key-value pairs to associate with the marker. There
-  #   are also reserved property names that have marker-specific meaning.
-  #   * `reversed` (optional) {Boolean} Creates the marker in a reversed
-  #     orientation. (default: false)
-  #   * `invalidate` (optional) {String} Determines the rules by which changes
-  #     to the buffer *invalidate* the marker. (default: 'overlap') It can be
-  #     any of the following strategies, in order of fragility:
-  #     * __never__: The marker is never marked as invalid. This is a good choice for
-  #       markers representing selections in an editor.
-  #     * __surround__: The marker is invalidated by changes that completely surround it.
-  #     * __overlap__: The marker is invalidated by changes that surround the
-  #       start or end of the marker. This is the default.
-  #     * __inside__: The marker is invalidated by changes that extend into the
-  #       inside of the marker. Changes that end at the marker's start or
-  #       start at the marker's end do not invalidate the marker.
-  #     * __touch__: The marker is invalidated by a change that touches the marked
-  #       region in any way, including changes that end at the marker's
-  #       start or start at the marker's end. This is the most fragile strategy.
-  #   * `exclusive` {Boolean} indicating whether insertions at the start or end
-  #     of the marked range should be interpreted as happening *outside* the
-  #     marker. Defaults to `false`, except when using the `inside`
-  #     invalidation strategy or when when the marker has no tail, in which
-  #     case it defaults to true. Explicitly assigning this option overrides
-  #     behavior in all circumstances.
-  #
-  # Returns a {Marker}.
-  markRange: (range, properties) -> @defaultMarkerLayer.markRange(range, properties)
-
-  # Public: Create a marker at the given position with no tail in the default
-  # marker layer.
-  #
-  # * `position` {Point} or point-compatible {Array}
-  # * `options` (optional) An {Object} with the following keys:
-  #   * `invalidate` (optional) {String} Determines the rules by which changes
-  #     to the buffer *invalidate* the marker. (default: 'overlap') It can be
-  #     any of the following strategies, in order of fragility:
-  #     * __never__: The marker is never marked as invalid. This is a good choice for
-  #       markers representing selections in an editor.
-  #     * __surround__: The marker is invalidated by changes that completely surround it.
-  #     * __overlap__: The marker is invalidated by changes that surround the
-  #       start or end of the marker. This is the default.
-  #     * __inside__: The marker is invalidated by changes that extend into the
-  #       inside of the marker. Changes that end at the marker's start or
-  #       start at the marker's end do not invalidate the marker.
-  #     * __touch__: The marker is invalidated by a change that touches the marked
-  #       region in any way, including changes that end at the marker's
-  #       start or start at the marker's end. This is the most fragile strategy.
-  #   * `exclusive` {Boolean} indicating whether insertions at the start or end
-  #     of the marked range should be interpreted as happening *outside* the
-  #     marker. Defaults to `false`, except when using the `inside`
-  #     invalidation strategy or when when the marker has no tail, in which
-  #     case it defaults to true. Explicitly assigning this option overrides
-  #     behavior in all circumstances.
-  #
-  # Returns a {Marker}.
-  markPosition: (position, options) -> @defaultMarkerLayer.markPosition(position, options)
-
-  # Public: Get all existing markers on the default marker layer.
-  #
-  # Returns an {Array} of {Marker}s.
-  getMarkers: -> @defaultMarkerLayer.getMarkers()
-
-  # Public: Get an existing marker by its id from the default marker layer.
-  #
-  # * `id` {Number} id of the marker to retrieve
-  #
-  # Returns a {Marker}.
-  getMarker: (id) -> @defaultMarkerLayer.getMarker(id)
-
-  # Public: Find markers conforming to the given parameters in the default
-  # marker layer.
-  #
-  # Markers are sorted based on their position in the buffer. If two markers
-  # start at the same position, the larger marker comes first.
-  #
-  # * `params` A hash of key-value pairs constraining the set of returned markers. You
-  #   can query against custom marker properties by listing the desired
-  #   key-value pairs here. In addition, the following keys are reserved and
-  #   have special semantics:
-  #   * `startPosition` Only include markers that start at the given {Point}.
-  #   * `endPosition` Only include markers that end at the given {Point}.
-  #   * `containsPoint` Only include markers that contain the given {Point}, inclusive.
-  #   * `containsRange` Only include markers that contain the given {Range}, inclusive.
-  #   * `startRow` Only include markers that start at the given row {Number}.
-  #   * `endRow` Only include markers that end at the given row {Number}.
-  #   * `intersectsRow` Only include markers that intersect the given row {Number}.
-  #
-  # Returns an {Array} of {Marker}s.
-  findMarkers: (params) -> @defaultMarkerLayer.findMarkers(params)
-
-  # Public: Get the number of markers in the default marker layer.
-  #
-  # Returns a {Number}.
-  getMarkerCount: -> @defaultMarkerLayer.getMarkerCount()
-
-  destroyMarker: (id) ->
-    @getMarker(id)?.destroy()
-
-  ###
   Section: History
   ###
 
@@ -794,8 +579,6 @@ class TextBuffer
   undo: ->
     if pop = @history.popUndoStack()
       @applyChange(change) for change in pop.patch.getChanges()
-      @restoreFromMarkerSnapshot(pop.snapshot)
-      @emitMarkerChangeEvents(pop.snapshot)
       @emitDidChangeTextEvent(pop.patch)
       true
     else
@@ -805,8 +588,6 @@ class TextBuffer
   redo: ->
     if pop = @history.popRedoStack()
       @applyChange(change) for change in pop.patch.getChanges()
-      @restoreFromMarkerSnapshot(pop.snapshot)
-      @emitMarkerChangeEvents(pop.snapshot)
       @emitDidChangeTextEvent(pop.patch)
       true
     else
@@ -830,7 +611,7 @@ class TextBuffer
       fn = groupingInterval
       groupingInterval = 0
 
-    checkpointBefore = @history.createCheckpoint(@createMarkerSnapshot(), true)
+    checkpointBefore = @history.createCheckpoint(true)
 
     try
       @transactCallDepth++
@@ -842,13 +623,11 @@ class TextBuffer
     finally
       @transactCallDepth--
 
-    endMarkerSnapshot = @createMarkerSnapshot()
-    compactedChanges = @history.groupChangesSinceCheckpoint(checkpointBefore, endMarkerSnapshot, true)
+    compactedChanges = @history.groupChangesSinceCheckpoint(checkpointBefore, true)
     global.atom?.assert compactedChanges, "groupChangesSinceCheckpoint() returned false.", (error) =>
       error.metadata = {history: @history.toString()}
     @history.applyGroupingInterval(groupingInterval)
     @history.enforceUndoStackSizeLimit()
-    @emitMarkerChangeEvents(endMarkerSnapshot)
     @emitDidChangeTextEvent(compactedChanges) if compactedChanges
     result
 
@@ -865,7 +644,7 @@ class TextBuffer
   #
   # Returns a checkpoint value.
   createCheckpoint: ->
-    @history.createCheckpoint(@createMarkerSnapshot(), false)
+    @history.createCheckpoint(false)
 
   # Public: Revert the buffer to the state it was in when the given
   # checkpoint was created.
@@ -879,8 +658,6 @@ class TextBuffer
   revertToCheckpoint: (checkpoint) ->
     if truncated = @history.truncateUndoStack(checkpoint)
       @applyChange(change) for change in truncated.patch.getChanges()
-      @restoreFromMarkerSnapshot(truncated.snapshot)
-      @emitter.emit 'did-update-markers'
       @emitDidChangeTextEvent(truncated.patch)
       true
     else
@@ -894,7 +671,7 @@ class TextBuffer
   #
   # Returns a {Boolean} indicating whether the operation succeeded.
   groupChangesSinceCheckpoint: (checkpoint) ->
-    @history.groupChangesSinceCheckpoint(checkpoint, @createMarkerSnapshot(), false)
+    @history.groupChangesSinceCheckpoint(checkpoint, false)
 
   # Public: Returns a list of changes since the given checkpoint.
   #
@@ -1161,19 +938,6 @@ class TextBuffer
       position
 
   ###
-  Section: Display Layers
-  ###
-
-  addDisplayLayer: (params) ->
-    id = @nextDisplayLayerId++
-    @displayLayers[id] = new DisplayLayer(id, this, params)
-
-  getDisplayLayer: (id) ->
-    @displayLayers[id]
-
-  setDisplayLayers: (@displayLayers) -> # Used for deserialization
-
-  ###
   Section: Private Utility Methods
   ###
 
@@ -1197,21 +961,6 @@ class TextBuffer
     @refcount--
     @destroy() unless @isRetained()
     this
-
-  createMarkerSnapshot: ->
-    snapshot = {}
-    for markerLayerId, markerLayer of @markerLayers
-      if markerLayer.maintainHistory
-        snapshot[markerLayerId] = markerLayer.createSnapshot()
-    snapshot
-
-  restoreFromMarkerSnapshot: (snapshot) ->
-    for markerLayerId, layerSnapshot of snapshot
-      @markerLayers[markerLayerId]?.restoreFromSnapshot(layerSnapshot)
-
-  emitMarkerChangeEvents: (snapshot) ->
-    for markerLayerId, markerLayer of @markerLayers
-      markerLayer.emitChangeEvents(snapshot?[markerLayerId])
 
   emitDidChangeTextEvent: (patch) ->
     return if @transactCallDepth isnt 0
@@ -1271,28 +1020,3 @@ class TextBuffer
       oldText: change.oldText
       newText: change.newText
     }
-
-  serializeSnapshot: (snapshot, options) ->
-    return unless options.markerLayers
-
-    MarkerLayer.serializeSnapshot(snapshot)
-
-  deserializeSnapshot: (snapshot) ->
-    MarkerLayer.deserializeSnapshot(snapshot)
-
-  ###
-  Section: Private MarkerLayer Delegate Methods
-  ###
-
-  markerLayerDestroyed: (markerLayer) ->
-    delete @markerLayers[markerLayer.id]
-
-  markerCreated: (layer, marker) ->
-    if layer is @defaultMarkerLayer
-      @emitter.emit 'did-create-marker', marker
-
-  markersUpdated: (layer) ->
-    if layer is @defaultMarkerLayer
-      @emitter.emit 'did-update-markers'
-
-  getNextMarkerId: -> @nextMarkerId++
