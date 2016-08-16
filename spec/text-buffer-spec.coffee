@@ -1,7 +1,5 @@
 fs = require 'fs-plus'
 {join} = require 'path'
-temp = require 'temp'
-{File} = require 'pathwatcher'
 Random = require 'random-seed'
 Point = require '../src/point'
 Range = require '../src/range'
@@ -13,7 +11,6 @@ describe "TextBuffer", ->
   buffer = null
 
   beforeEach ->
-    temp.track()
     jasmine.addCustomEqualityTester(require("underscore-plus").isEqual)
     # When running specs in Atom, setTimeout is spied on by default.
     jasmine.useRealClock?()

@@ -1,7 +1,6 @@
 {Emitter, CompositeDisposable} = require 'event-kit'
 SpanSkipList = require 'span-skip-list'
 diff = require 'diff'
-_ = require 'underscore-plus'
 crypto = require 'crypto'
 Patch = require 'atom-patch'
 Point = require './point'
@@ -81,7 +80,6 @@ class TextBuffer
 
     @emitter = new Emitter
     @patchesSinceLastStoppedChangingEvent = []
-    @didChangeTextPatch = new Patch
     @id = params?.id ? crypto.randomBytes(16).toString('hex')
     @lines = ['']
     @lineEndings = ['']
