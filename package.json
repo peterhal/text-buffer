@@ -1,7 +1,7 @@
 {
-  "name": "text-buffer",
+  "name": "simple-text-buffer",
   "version": "9.2.6",
-  "description": "A container for large mutable strings with annotated regions",
+  "description": "A version of Atom's text-buffer with marker layers and file support removed",
   "main": "./lib/text-buffer",
   "scripts": {
     "prepublish": "npm run clean && npm run compile && npm run lint && npm run atomdoc",
@@ -14,10 +14,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/atom/text-buffer.git"
+    "url": "https://github.com/peterhal/text-buffer.git"
   },
   "bugs": {
-    "url": "https://github.com/atom/text-buffer/issues"
+    "url": "https://github.com/peterhal/text-buffer/issues"
   },
   "license": "MIT",
   "devDependencies": {
