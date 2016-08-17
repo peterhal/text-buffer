@@ -45,11 +45,11 @@
     "underscore-plus": "^1.0.0"
   },
   "dependencies": {
-    "diff": "^2.2.1",
+    "diff": "3.0.0",
     "atom-patch": "0.3.0",
-    "event-kit": "^2.1.0",
+    "event-kit": "2.1.0",
     "line-length-index": "0.0.2",
-    "span-skip-list": "~0.2.0",
+    "span-skip-list": "0.2.0"
   },
   "coffeelintConfig": {
     "no_empty_param_list": {
