@@ -48,7 +48,6 @@
     "diff": "2.2.2",
     "atom-patch": "0.3.0",
     "event-kit": "2.0.0",
-    "line-length-index": "0.0.2",
     "span-skip-list": "0.2.0"
   },
   "coffeelintConfig": {
