@@ -1,6 +1,6 @@
 {
   "name": "simple-text-buffer",
-  "version": "9.2.10",
+  "version": "9.2.11",
   "description": "A version of Atom's text-buffer with marker layers and file support removed",
   "main": "./lib/text-buffer",
   "scripts": {
